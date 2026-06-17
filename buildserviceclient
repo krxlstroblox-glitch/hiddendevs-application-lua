@@ -1,0 +1,206 @@
+local BuildServiceClient = {}
+
+local ServerScriptService = game:GetService("ServerScriptService")
+local TweenService = game:GetService("TweenService")
+local RepStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Modules = RepStorage.Modules
+
+local SharedFolder = RepStorage:FindFirstChild("Shared")
+local Remotes = SharedFolder:FindFirstChild("Events")
+local BuildServiceRemotes = Remotes:FindFirstChild("BuildEvents")
+
+local Town = workspace:WaitForChild("Town")
+local TownBuildings = Town:FindFirstChild("TownBuildings")
+local BuildingsFolder = workspace:WaitForChild("Assets"):FindFirstChild("Buildings")
+
+local MyFunctions = require(SharedFolder.Parent.Packages.Myfunctions)
+local BuildServiceUtils = require(SharedFolder.Services.BuildService.BuildServiceUtils)
+local StateHandlerModule = require(SharedFolder.StateHandler)
+
+-- ============================================================
+-- Global Events -- lowkey isnt as usefull as i fought
+-- ============================================================
+local PlaceBuildEvent = MyFunctions:CreateGlobalEvent(
+	BuildServiceRemotes.Remote.PlaceBuild,
+	BuildServiceRemotes.Bindable.PlaceBuild
+)
+
+local LastSnappedPosition = Vector3.zero
+local Baseplate: BasePart = nil
+
+local BuildSessionId = 0
+local RenderConnection
+
+local BuildingEdited:Model = nil
+local BuildingPrimaryPart:BasePart = nil
+
+local CurrentBuildingRotation = 0
+local TargetBuildingRotation = 0
+
+BuildServiceClient.ValidPosition = BuildServiceUtils.ValidPosition
+BuildServiceClient.ChangedValidation = BuildServiceUtils.ChangedValidation
+
+function BuildServiceClient:BuildEditor(BuildingName:string)
+
+	print("BuildEditor started")
+
+	if RenderConnection then
+		RenderConnection:Disconnect()
+		RenderConnection = nil
+	end
+
+	if not BuildingName then return end
+	if BuildingEdited then
+		BuildingEdited:Destroy()
+		BuildingEdited = nil
+		BuildingPrimaryPart = nil
+	end
+
+
+	local BuildingOrginModel:Model = MyFunctions:GetModelFromName(BuildingName)
+	local Building:Model = BuildingOrginModel:Clone()
+
+	MyFunctions:waitForPrimaryPart(Building)
+
+	BuildingEdited = Building
+	BuildingPrimaryPart = Building.PrimaryPart
+	Building.Parent = BuildingsFolder:FindFirstChild("EditedBuilding") or workspace
+
+	StateHandlerModule.SetState("Build") -- State: Idle -> Build
+
+	local Plr = game.Players.LocalPlayer
+	local Mouse = Plr:GetMouse()
+
+	Baseplate = workspace.Town:WaitForChild("Baseplate")
+
+	local raycastParams = RaycastParams.new()
+	raycastParams.FilterType = Enum.RaycastFilterType.Whitelist
+	raycastParams.FilterDescendantsInstances = {Baseplate}
+
+	local gridSize = 4
+	local gridOffset = Vector3.new(2, 0, 2)
+
+	local function snapVector(pos)
+		return Vector3.new(
+			math.floor((pos.X - gridOffset.X) / gridSize + 0.5) * gridSize + gridOffset.X,
+			pos.Y,
+			math.floor((pos.Z - gridOffset.Z) / gridSize + 0.5) * gridSize + gridOffset.Z
+		)
+	end
+
+	local currentPos = BuildingPrimaryPart.Position
+	local velocity = Vector3.zero
+
+	local stiffness = 25
+	local damping = 8
+	local tiltAmount = 0.0025
+
+	BuildSessionId += 1
+	local thisSession = BuildSessionId
+
+	RenderConnection = RunService.RenderStepped:Connect(function(dt)
+
+		if thisSession ~= BuildSessionId then return end
+		if not BuildingEdited or not BuildingEdited.Parent or not BuildingEdited.PrimaryPart then return end
+
+		local unitRay = Mouse.UnitRay
+		local result = workspace:Raycast(unitRay.Origin, unitRay.Direction * 1000, raycastParams)
+
+	if result then
+			local hitPos = result.Position
+
+			local snapped = snapVector(hitPos)
+			LastSnappedPosition = snapped
+			snapped += Vector3.new(0, BuildingPrimaryPart.Size.Y / 2, 0)
+
+			local displacement = snapped - currentPos
+			local accel = displacement * stiffness - velocity * damping
+			velocity += accel * dt
+			currentPos += velocity * dt
+
+			local tiltX = math.clamp(-velocity.Z * tiltAmount, -0.13, 0.13)
+			local tiltZ = math.clamp(velocity.X * tiltAmount, -0.13, 0.13)
+
+			local tiltCFrame = CFrame.Angles(tiltX, 0, tiltZ)
+
+			local rotationSpeed = 10
+			CurrentBuildingRotation += (TargetBuildingRotation - CurrentBuildingRotation) * math.clamp(dt * rotationSpeed, 0, 1)
+			CurrentBuildingRotation = CurrentBuildingRotation % 360
+
+			local rotationCFrame = CFrame.Angles(0, math.rad(CurrentBuildingRotation), 0)
+
+			local finalCFrame =
+				CFrame.new(currentPos)
+				* rotationCFrame
+				* tiltCFrame
+
+			if BuildingEdited then
+				BuildingEdited:SetPrimaryPartCFrame(finalCFrame)
+			end
+
+			-- recheck
+			local targetCFrame = CFrame.new(snapped) * CFrame.Angles(0, math.rad(TargetBuildingRotation), 0)
+			BuildServiceUtils:CheckValidPosition(targetCFrame, BuildingPrimaryPart, BuildingEdited, Baseplate)
+		else
+			BuildServiceUtils:SetValidation(false)
+		end
+	end)
+end
+
+
+
+function BuildServiceClient:RotateStructure(RotateAngle:number)
+	if not BuildingEdited then return end
+
+	TargetBuildingRotation += RotateAngle
+	TargetBuildingRotation = TargetBuildingRotation % 360
+end
+
+
+
+function BuildServiceClient:PlaceStructure()
+	if not BuildingEdited or not BuildingEdited.PrimaryPart then return end
+
+	local placeCFrame = CFrame.new(
+		LastSnappedPosition + Vector3.new(0, BuildingPrimaryPart.Size.Y / 2, 0)
+	) * CFrame.Angles(0, math.rad(TargetBuildingRotation), 0)
+
+	if not BuildServiceUtils:CheckValidPosition(placeCFrame, BuildingPrimaryPart, BuildingEdited, Baseplate) then
+		warn("Cant place structure — position invalid")
+		return
+	end
+
+	PlaceBuildEvent:Fire(nil, BuildingEdited.Name, placeCFrame)
+
+	BuildingEdited:Destroy()
+	BuildingEdited = nil
+	BuildingPrimaryPart = nil
+	StateHandlerModule.ClearState() -- State: Build -> Idle
+end
+
+
+
+function BuildServiceClient:ChangeBuilding(NewBuilding:Model)
+
+	if not NewBuilding then return end
+	MyFunctions:waitForPrimaryPart(NewBuilding)
+
+	if not NewBuilding.PrimaryPart then return end
+
+	if BuildingEdited then
+		BuildingEdited:Destroy()
+	end
+
+	local Clone = NewBuilding:Clone()
+	Clone.Parent = BuildingsFolder:FindFirstChild("EditedBuilding") or workspace
+
+	BuildingEdited = Clone
+	BuildingPrimaryPart = Clone.PrimaryPart
+
+	CurrentBuildingRotation = 0
+	TargetBuildingRotation = 0
+end
+
+return BuildServiceClient
