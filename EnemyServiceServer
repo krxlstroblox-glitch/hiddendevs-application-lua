@@ -1,0 +1,190 @@
+local EnemyService = {}
+
+local ServerScriptService = game:GetService("ServerScriptService")
+local TweenService = game:GetService("TweenService")
+local RepStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+
+local Modules = RepStorage.Modules
+
+local SharedFolder = RepStorage:FindFirstChild("Shared")
+local Remotes = SharedFolder:FindFirstChild("Events")
+local EnemyServiceRemotes = Remotes:FindFirstChild("EnemiesEvents")
+
+local Town = workspace:WaitForChild("Town")
+local TownBuildings = Town:FindFirstChild("TownBuildings")
+local BuildingsFolder = workspace:WaitForChild("Assets"):FindFirstChild("Buildings")
+local EnemiesFolder = workspace:WaitForChild("Assets"):FindFirstChild("Enemies")
+
+local MyFunctions = require(SharedFolder.Parent.Packages.Myfunctions)
+local EnemyServiceUtils = require(SharedFolder.Services.EnemyService.EnemyServiceUtils)
+local StateHandlerModule = require(SharedFolder.StateHandler).server
+local EnemiesModule = require(Modules:WaitForChild("Information"):WaitForChild("EnemiesModule"))
+
+local Settings = require(script.EnemyServiceSettings)
+
+local luck = Settings.Luck
+
+--// returns a random position on the circle
+function EnemyService:GetSpawnPos(
+	customSpawnRadius: number?,
+	customMaxOffset: number?,
+	customCenterPos: Vector3?
+)
+	local spawnRadius = customSpawnRadius or Settings.Spawnradius
+	local maxOffset = customMaxOffset or Settings.MaxOffset
+	local centerPos = customCenterPos or Settings.CenterPos
+
+	local angle = math.random() * math.pi * 2
+
+	local radius = spawnRadius
+
+	local x = math.cos(angle) * radius
+	local z = math.sin(angle) * radius
+
+
+	local offsetX = (math.random() * 2 - 1) * maxOffset
+	local offsetZ = (math.random() * 2 - 1) * maxOffset
+
+	local spawnPos = centerPos + Vector3.new(
+		x + offsetX,
+		0,
+		z + offsetZ
+	)
+
+	local spawnCFrame = CFrame.lookAt(
+		spawnPos,
+		Vector3.new(
+			centerPos.X,
+			spawnPos.Y,
+			centerPos.Z
+		)
+	)
+
+	return spawnCFrame
+end
+
+function EnemyService:GetRandomEnemyData(playerLuck: number)
+	playerLuck = playerLuck or Settings.Luck
+
+	local enemies = MyFunctions:GetEnemiesFunc(EnemiesModule)
+
+	local totalChance = 0
+	local calculatedChances = {}
+
+	-- calc chnaces
+	for _, enemy in ipairs(enemies) do
+		local baseChance = enemy.Data.Chance
+
+		local adjustedChance = baseChance ^ (1 / playerLuck)
+
+		calculatedChances[enemy] = adjustedChance
+		totalChance += adjustedChance
+	end
+
+	-- get random enemy
+	local roll = math.random() * totalChance
+	local current = 0
+
+	for _, enemy in ipairs(enemies) do
+		current += calculatedChances[enemy]
+
+		if roll <= current then
+			return enemy
+		end
+	end
+end
+
+function EnemyService:CreateEnemy(EnemyData, SpawnCFrame: CFrame)
+	local Enemy: Model = MyFunctions:GetModelFromName(
+		EnemyData.Name,
+		EnemiesFolder
+	)
+
+	local EnemyClone: Model = Enemy:Clone()
+	local EnemyCloneHumanoid: Humanoid = EnemyClone:WaitForChild("Humanoid")
+
+	EnemyClone.Parent = Town:WaitForChild("CurrentEnemies")
+	EnemyClone.Name = EnemyData.Name
+	
+	if EnemyCloneHumanoid and EnemyData.Data.Health then
+		EnemyCloneHumanoid.MaxHealth = EnemyData.Data.Health
+		EnemyCloneHumanoid.Health = EnemyData.Data.Health
+	elseif not EnemyData.Data.Health then
+		print("no health data")
+	elseif not EnemyCloneHumanoid then
+		print("no humanoid")
+	end
+
+	EnemyClone:PivotTo(SpawnCFrame)
+
+	return EnemyClone
+end
+
+function EnemyService:MoveEnemy(Enemy: Model, EnemyData)
+	local hrp = Enemy:WaitForChild("HumanoidRootPart")
+
+	local target = Settings.CenterPos
+	local speed = EnemyData.Data.Speed or 5
+
+	local RunService = game:GetService("RunService")
+
+	local connection
+	connection = RunService.Heartbeat:Connect(function(dt)
+		if not Enemy or not Enemy.Parent then
+			connection:Disconnect()
+			return
+		end
+
+		local direction = target - hrp.Position
+		local distance = direction.Magnitude
+
+		-- stop if close (REMOVE THIS LATER!)
+		if distance < 2 then
+			Enemy:Destroy()
+			connection:Disconnect()
+			print("lost")
+			return
+		end
+
+		local move = direction.Unit * speed * dt
+		local newPos = hrp.Position + move
+
+		hrp.CFrame = CFrame.lookAt(newPos, target)
+	end)
+end
+
+function EnemyService:SpawnEnemy(playerLuck: number,CustomSpawnRadius:number, CustomMaxOffset:number,CustomCenterPos:Vector3)
+	local SpawnCFrame = EnemyService:GetSpawnPos(CustomSpawnRadius, CustomMaxOffset,CustomCenterPos)
+	local EnemyData = EnemyService:GetRandomEnemyData(playerLuck)
+	local Enemy = EnemyService:CreateEnemy(EnemyData,SpawnCFrame)
+	local Tween = EnemyService:MoveEnemy(Enemy,EnemyData,SpawnCFrame)
+	
+	return Enemy,EnemyData,SpawnCFrame
+end
+
+function EnemyService:SpawnWave(WaveNumber:number,playerLuck:number,CustomSpawnRadius:number, CustomMaxOffset:number,CustomCenterPos:Vector3)
+	
+	if WaveNumber <= 100 then
+		for i = WaveNumber, 0, -1 do
+			local Enemy,EnemyData,SpawnCFrame = EnemyService:SpawnEnemy(playerLuck,CustomSpawnRadius, CustomMaxOffset,CustomCenterPos)
+			wait(1)
+		end
+	
+	elseif WaveNumber > 100 then
+		for i = 100, 0, -1 do
+			local Enemy,EnemyData,SpawnCFrame = EnemyService:SpawnEnemy(playerLuck,CustomSpawnRadius, CustomMaxOffset,CustomCenterPos)
+			wait(1)
+		end
+	end
+	
+	EnemyServiceRemotes.Bindable.SpawnedWave:Fire(WaveNumber,playerLuck)
+	EnemyServiceRemotes.Remote.SpawnedWave:FireAllClients(WaveNumber,playerLuck)
+	
+end
+
+function EnemyService:GetCurrentWave()
+	return Settings.Wave
+end
+
+return EnemyService
